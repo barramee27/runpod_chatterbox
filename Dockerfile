@@ -22,7 +22,7 @@ RUN pip install chatterbox-tts==0.1.6
 
 COPY rp_handler.py /
 
-# This step will now succeed because the torch/torchvision versions match
-RUN python -c "from chatterbox.tts import ChatterboxTTS; ChatterboxTTS.from_pretrained(device='cuda')"
+# Change this line (likely line 26) in your Dockerfile:
+RUN python -c "from chatterbox.tts import ChatterboxTTS; ChatterboxTTS.from_pretrained(device='cpu')"
 
 CMD ["python3", "-u", "rp_handler.py"]
