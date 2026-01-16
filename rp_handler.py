@@ -1,5 +1,6 @@
 import runpod
 import time  
+import torch
 import torchaudio 
 import yt_dlp
 import os
@@ -10,6 +11,7 @@ from chatterbox.tts import ChatterboxTTS
 from pathlib import Path
 
 model = None
+device = None
 output_filename = "output.wav"
 
 def handler(event, responseFormat="base64"):
@@ -20,14 +22,24 @@ def handler(event, responseFormat="base64"):
     print(f"New request. Prompt: {prompt}")
     
     try:
+        # Ensure model is initialized
+        if model is None:
+            initialize_model()
+        
         # Download audio from YT, cut at 60s by default
         dl_info, wav_file = download_youtube_audio(yt_url, output_path="./my_audio", audio_format="wav")
 
-        # Prompt Chatterbox
+        # Prompt Chatterbox - ensure inputs are on correct device
+        print(f"Generating audio on device: {device}")
         audio_tensor = model.generate(
             prompt,
             audio_prompt_path=wav_file
         )
+        
+        # Ensure output tensor is on CPU for saving/encoding
+        if isinstance(audio_tensor, torch.Tensor) and audio_tensor.device.type != 'cpu':
+            audio_tensor = audio_tensor.cpu()
+            print("Moved audio tensor to CPU for processing")
 
         # Save as WAV
         torchaudio.save(output_filename, audio_tensor, model.sr)
@@ -86,19 +98,40 @@ def audio_tensor_to_base64(audio_tensor, sample_rate):
 
 
 def initialize_model():
-    global model
+    global model, device
     
     if model is not None:
         return model
+    
+    # Detect and set device
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        print(f"CUDA available! Using GPU: {torch.cuda.get_device_name(0)}")
+        print(f"CUDA version: {torch.version.cuda}")
+        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+    else:
+        device = torch.device("cpu")
+        print("WARNING: CUDA not available! Falling back to CPU (this will be slow)")
     
     # Get the model ID from the RunPod environment variables
     # Default to turbo if not found
     model_id = os.getenv("MODEL_ID", "ResembleAI/chatterbox-turbo")
     
     print(f"Initializing ChatterboxTTS model: {model_id}...")
-    # This now uses the specific version you set in the cloud console
-    model = ChatterboxTTS.from_pretrained(model_id, device="cuda")
-    print("Model initialized and ready on GPU")
+    # Initialize model on the detected device
+    model = ChatterboxTTS.from_pretrained(model_id, device=device)
+    
+    # Explicitly move model to device (double-check)
+    if hasattr(model, 'to'):
+        model = model.to(device)
+    
+    print(f"Model initialized and ready on {device}")
+    
+    # Verify model is on correct device
+    if hasattr(model, 'device'):
+        print(f"Model device: {model.device}")
+    elif hasattr(model, 'model') and hasattr(model.model, 'device'):
+        print(f"Model device: {model.model.device}")
     
 def download_youtube_audio(url, output_path="./downloads", audio_format="mp3", duration_limit=60):
     """
