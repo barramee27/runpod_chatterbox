@@ -402,14 +402,18 @@ def initialize_model():
     if mem_before_load:
         print(f"GPU Memory before model load: {mem_before_load['free_gb']:.2f}GB free")
     
-    # Initialize model - DO NOT pass device parameter (causes TypeError)
-    # Load first, then move to device
+    # Initialize model - CRITICAL FIX: Do NOT pass device to from_pretrained
+    # The library's from_pretrained method does NOT accept device parameter
+    # We load first, then move to device manually
     try:
+        # Load model WITHOUT device parameter - this is the key fix
         model = ChatterboxTTS.from_pretrained(model_id)
         print("Model loaded successfully")
     except Exception as e:
         error_msg = f"Failed to load model: {e}"
         print(f"ERROR: {error_msg}")
+        import traceback
+        traceback.print_exc()
         raise RuntimeError(error_msg)
     
     # CRITICAL: Explicitly move model to GPU device - NO CPU FALLBACK
@@ -417,22 +421,36 @@ def initialize_model():
     moved_to_gpu = False
     
     if hasattr(model, 'to'):
-        model = model.to(device)
-        moved_to_gpu = True
-        print("Model moved to GPU using .to(device) method")
+        try:
+            model = model.to(device)
+            moved_to_gpu = True
+            print("Model moved to GPU using .to(device) method")
+        except Exception as e:
+            print(f"Warning: .to(device) failed: {e}")
     elif hasattr(model, 'cuda'):
-        model = model.cuda()
-        moved_to_gpu = True
-        print("Model moved to GPU using .cuda() method")
-    elif hasattr(model, 'model'):
+        try:
+            model = model.cuda()
+            moved_to_gpu = True
+            print("Model moved to GPU using .cuda() method")
+        except Exception as e:
+            print(f"Warning: .cuda() failed: {e}")
+    
+    # Try moving internal model components if direct move didn't work
+    if not moved_to_gpu and hasattr(model, 'model'):
         if hasattr(model.model, 'to'):
-            model.model = model.model.to(device)
-            moved_to_gpu = True
-            print("Model moved to GPU via model.model.to(device)")
+            try:
+                model.model = model.model.to(device)
+                moved_to_gpu = True
+                print("Model moved to GPU via model.model.to(device)")
+            except Exception as e:
+                print(f"Warning: model.model.to(device) failed: {e}")
         elif hasattr(model.model, 'cuda'):
-            model.model = model.model.cuda()
-            moved_to_gpu = True
-            print("Model moved to GPU via model.model.cuda()")
+            try:
+                model.model = model.model.cuda()
+                moved_to_gpu = True
+                print("Model moved to GPU via model.model.cuda()")
+            except Exception as e:
+                print(f"Warning: model.model.cuda() failed: {e}")
     
     if not moved_to_gpu:
         error_msg = "ERROR: Could not move model to GPU! Model does not support .to() or .cuda() methods."
