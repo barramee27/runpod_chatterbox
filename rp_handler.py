@@ -525,17 +525,33 @@ if __name__ == '__main__':
     print("Chatterbox TTS RunPod Handler - GPU ONLY (NO CPU FALLBACK)")
     print("=" * 60)
     
-    # Verify CUDA before starting
-    if not torch.cuda.is_available():
-        error_msg = "FATAL ERROR: CUDA/GPU is not available! This handler REQUIRES NVIDIA GPU."
+    try:
+        # Verify CUDA before starting
+        if not torch.cuda.is_available():
+            error_msg = "FATAL ERROR: CUDA/GPU is not available! This handler REQUIRES NVIDIA GPU."
+            print("=" * 60)
+            print(error_msg)
+            print("=" * 60)
+            raise RuntimeError(error_msg)
+        
+        print("Initializing model... This may take a few minutes.")
+        initialize_model()
+        print("=" * 60)
+        print("Handler ready and waiting for requests...")
+        print("GPU ONLY mode - All processing will use NVIDIA GPU")
+        print("=" * 60)
+        
+        # Start the serverless handler
+        runpod.serverless.start({'handler': handler})
+        
+    except Exception as e:
+        error_msg = f"FATAL ERROR during handler startup: {str(e)}"
         print("=" * 60)
         print(error_msg)
         print("=" * 60)
-        raise RuntimeError(error_msg)
-    
-    initialize_model()
-    print("=" * 60)
-    print("Handler ready and waiting for requests...")
-    print("GPU ONLY mode - All processing will use NVIDIA GPU")
-    print("=" * 60)
-    runpod.serverless.start({'handler': handler})
+        import traceback
+        traceback.print_exc()
+        # Don't raise - let RunPod handle the restart
+        # But log the error clearly
+        print("Handler failed to start. RunPod will restart the worker.")
+        raise
