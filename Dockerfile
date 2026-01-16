@@ -1,22 +1,30 @@
-FROM runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04
+# Use a stable PyTorch image that matches the model requirements
+FROM runpod/pytorch:2.6.0-py3.11-cuda12.4.1-devel-ubuntu22.04
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     git \
     wget \
     curl \
-    ffmpeg
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN python -m pip install --no-deps chatterbox-tts
-
+# Set working directory
 WORKDIR /
+
+# Copy requirements first to leverage Docker cache
 COPY requirements.txt /requirements.txt
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r /requirements.txt
+
+# Install Chatterbox (allowing dependencies to resolve correctly)
+RUN pip install chatterbox-tts==0.1.6
+
+# Copy the handler script
 COPY rp_handler.py /
 
-RUN python -c "from chatterbox.tts import ChatterboxTTS; model = ChatterboxTTS.from_pretrained(device='cuda')"
+# Pre-download and cache the model weights into the image
+# This prevents a 2-minute "Cold Start" every time you use the API
+RUN python -c "from chatterbox.tts import ChatterboxTTS; ChatterboxTTS.from_pretrained(device='cuda')"
 
-# Start the container
+# Start the Serverless worker
 CMD ["python3", "-u", "rp_handler.py"]
-
-
