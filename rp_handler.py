@@ -110,6 +110,8 @@ def handler(event, responseFormat="base64"):
 
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
+        import traceback
+        traceback.print_exc()
         return f"{e}" 
 
     # Convert to base64 string
@@ -217,16 +219,63 @@ def initialize_model():
     if mem_before_load:
         print(f"GPU Memory before model load: {mem_before_load['free_gb']:.2f}GB free")
     
-    # Initialize model on the detected device
-    model = ChatterboxTTS.from_pretrained(model_id, device=device)
+    # Initialize model - load without device parameter first, then move to device
+    # The from_pretrained method doesn't accept device as keyword argument
+    try:
+        # Try loading with device as string if supported
+        model = ChatterboxTTS.from_pretrained(model_id)
+        print("Model loaded successfully")
+    except TypeError as e:
+        print(f"Error loading model: {e}")
+        # Fallback: try with device as string
+        try:
+            device_str = "cuda" if torch.cuda.is_available() else "cpu"
+            model = ChatterboxTTS.from_pretrained(model_id, device=device_str)
+            print("Model loaded with device string")
+        except Exception as e2:
+            print(f"Failed to load model: {e2}")
+            raise
     
-    # Explicitly move model to device (double-check)
-    if hasattr(model, 'to'):
-        model = model.to(device)
+    # Explicitly move model to device
+    if torch.cuda.is_available():
+        print("Moving model to GPU...")
+        # Try different methods to move model to GPU
+        if hasattr(model, 'to'):
+            model = model.to(device)
+            print("Model moved to GPU using .to() method")
+        elif hasattr(model, 'cuda'):
+            model = model.cuda()
+            print("Model moved to GPU using .cuda() method")
+        elif hasattr(model, 'model'):
+            if hasattr(model.model, 'to'):
+                model.model = model.model.to(device)
+                print("Model moved to GPU via model.model.to()")
+            elif hasattr(model.model, 'cuda'):
+                model.model = model.model.cuda()
+                print("Model moved to GPU via model.model.cuda()")
+        
+        # Verify model is on GPU
+        try:
+            # Check if model has parameters
+            if hasattr(model, 'parameters'):
+                first_param = next(model.parameters(), None)
+                if first_param is not None:
+                    print(f"Model parameter device: {first_param.device}")
+                    if first_param.device.type != 'cuda':
+                        print("WARNING: Model parameters are not on GPU!")
+            elif hasattr(model, 'model') and hasattr(model.model, 'parameters'):
+                first_param = next(model.model.parameters(), None)
+                if first_param is not None:
+                    print(f"Model parameter device: {first_param.device}")
+                    if first_param.device.type != 'cuda':
+                        print("WARNING: Model parameters are not on GPU!")
+        except Exception as e:
+            print(f"Could not verify model device: {e}")
     
     # Enable evaluation mode for inference (faster, less memory)
     if hasattr(model, 'eval'):
         model.eval()
+        print("Model set to evaluation mode")
     
     # Move model to half precision if GPU has enough memory (faster inference, less memory)
     if torch.cuda.is_available() and torch.cuda.get_device_properties(0).total_memory >= 20 * 1024**3:
@@ -247,12 +296,6 @@ def initialize_model():
         print(f"GPU Memory available: {mem_after_load['free_gb']:.2f}GB free")
     
     print(f"Model initialized and ready on {device}")
-    
-    # Verify model is on correct device
-    if hasattr(model, 'device'):
-        print(f"Model device: {model.device}")
-    elif hasattr(model, 'model') and hasattr(model.model, 'device'):
-        print(f"Model device: {model.model.device}")
     
     # Final cache clear after initialization
     if torch.cuda.is_available():
