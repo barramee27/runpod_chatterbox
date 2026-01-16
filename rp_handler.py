@@ -50,6 +50,69 @@ def get_gpu_memory_info():
         }
     return None
 
+def save_data_url_to_file(data_url, output_path="./my_audio"):
+    """
+    Convert a data URL (base64 encoded audio) to a temporary audio file
+    
+    Args:
+        data_url (str): Data URL string (e.g., "data:audio/wav;base64,...")
+        output_path (str): Directory to save the audio file
+    
+    Returns:
+        str: Path to the saved audio file, or None if conversion failed
+    """
+    try:
+        # Check if it's a data URL
+        if not data_url.startswith('data:'):
+            return None
+        
+        # Parse the data URL
+        # Format: data:[<mediatype>][;base64],<data>
+        header, encoded = data_url.split(',', 1)
+        
+        # Extract MIME type if present
+        if ';base64' in header:
+            mime_type = header.split(':')[1].split(';')[0]
+        else:
+            mime_type = 'application/octet-stream'
+        
+        # Determine file extension from MIME type
+        mime_to_ext = {
+            'audio/wav': 'wav',
+            'audio/wave': 'wav',
+            'audio/x-wav': 'wav',
+            'audio/mpeg': 'mp3',
+            'audio/mp3': 'mp3',
+            'audio/mp4': 'm4a',
+            'audio/x-m4a': 'm4a',
+            'audio/ogg': 'ogg',
+            'audio/webm': 'webm',
+            'video/mp4': 'mp4',
+            'video/webm': 'webm',
+            'video/x-msvideo': 'avi',
+        }
+        
+        # Default to wav if unknown
+        ext = mime_to_ext.get(mime_type, 'wav')
+        
+        # Create output directory if it doesn't exist
+        Path(output_path).mkdir(parents=True, exist_ok=True)
+        
+        # Decode base64 data
+        audio_data = base64.b64decode(encoded)
+        
+        # Save to temporary file
+        output_file = os.path.join(output_path, f"uploaded_audio.{ext}")
+        with open(output_file, 'wb') as f:
+            f.write(audio_data)
+        
+        print(f"Saved uploaded audio file: {output_file} ({len(audio_data) / 1024:.2f} KB)")
+        return output_file
+        
+    except Exception as e:
+        print(f"Error converting data URL to file: {str(e)}")
+        return None
+
 def handler(event, responseFormat="base64"):
     input = event['input']    
     prompt = input.get('prompt')  
@@ -67,12 +130,21 @@ def handler(event, responseFormat="base64"):
         if model is None:
             initialize_model()
         
-        # Download audio from YT, cut at 60s by default
-        dl_info, wav_file = download_youtube_audio(yt_url, output_path="./my_audio", audio_format="wav")
+        # Check if yt_url is actually a data URL (uploaded file) or a YouTube URL
+        wav_file = None
+        if yt_url.startswith('data:'):
+            # Handle uploaded audio file (data URL)
+            print("Detected uploaded audio file (data URL)")
+            wav_file = save_data_url_to_file(yt_url, output_path="./my_audio")
+            if wav_file is None:
+                return {"error": "Failed to process uploaded audio file"}
+        else:
+            # Handle YouTube URL (existing functionality)
+            print(f"Detected YouTube URL: {yt_url}")
+            dl_info, wav_file = download_youtube_audio(yt_url, output_path="./my_audio", audio_format="wav")
+            if wav_file is None:
+                return {"error": "Failed to download audio from YouTube URL"}
         
-        if wav_file is None:
-            return {"error": "Failed to download audio from YouTube URL"}
-
         # Clear cache before generation to maximize available memory
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -138,7 +210,7 @@ def handler(event, responseFormat="base64"):
 
     # Clean up temporary files
     try:
-        if os.path.exists(wav_file):
+        if wav_file and os.path.exists(wav_file):
             os.remove(wav_file)
     except Exception as e:
         print(f"Warning: Could not remove temporary file {wav_file}: {e}")
