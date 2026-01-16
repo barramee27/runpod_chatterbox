@@ -1,4 +1,7 @@
-# Add this line to your existing requirements.txt
+# PyTorch with CUDA support (installed via Dockerfile, but listed here for reference)
+# torch==2.6.0
+# torchvision==0.21.0
+# torchaudio==2.6.0
 torchvision==0.21.0
 omegaconf
 gradio==5.44.1
