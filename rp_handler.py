@@ -89,13 +89,17 @@ def initialize_model():
     global model
     
     if model is not None:
-        print("Model already initialized")
         return model
     
-    print("Initializing ChatterboxTTS model...")
-    model = ChatterboxTTS.from_pretrained(device="cuda")
-    print("Model initialized")
-
+    # Get the model ID from the RunPod environment variables
+    # Default to turbo if not found
+    model_id = os.getenv("MODEL_ID", "ResembleAI/chatterbox-turbo")
+    
+    print(f"Initializing ChatterboxTTS model: {model_id}...")
+    # This now uses the specific version you set in the cloud console
+    model = ChatterboxTTS.from_pretrained(model_id, device="cuda")
+    print("Model initialized and ready on GPU")
+    
 def download_youtube_audio(url, output_path="./downloads", audio_format="mp3", duration_limit=60):
     """
     Download audio from a YouTube video
