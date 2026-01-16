@@ -1,11 +1,8 @@
-# Missing core dependencies causing the crash
 omegaconf
 gradio==5.44.1
 pykakasi==2.3.0
 pyloudnorm
 spacy-pkuseg
-
-# Existing dependencies with fixed versions for Chatterbox-Turbo
 conformer
 s3tokenizer
 librosa
@@ -14,12 +11,6 @@ huggingface_hub
 safetensors==0.5.3
 transformers==4.46.3
 diffusers==0.29.0
-torchaudio==2.6.0
-torch==2.6.0
-torchvision
-numpy<1.26.0,>=1.24.0
-
-# Server and Utility requirements
 einops
 yt_dlp
 ffmpeg-python
