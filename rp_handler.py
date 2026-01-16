@@ -17,33 +17,36 @@ output_filename = "output.wav"
 
 def optimize_torch_settings():
     """Configure PyTorch for optimal GPU performance on 24GB GPU"""
-    if torch.cuda.is_available():
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        torch.backends.cudnn.benchmark = True
-        torch.backends.cudnn.deterministic = False
-        # Set memory fraction to leave headroom
-        torch.cuda.set_per_process_memory_fraction(0.90)
-        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:512'
-        print("PyTorch optimized for 24GB GPU:")
-        print(f"  - TF32 enabled: {torch.backends.cuda.matmul.allow_tf32}")
-        print(f"  - cuDNN benchmark: {torch.backends.cudnn.benchmark}")
-        print(f"  - Memory fraction: 90%")
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available! This handler requires NVIDIA GPU.")
+    
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False
+    # Set memory fraction to leave headroom
+    torch.cuda.set_per_process_memory_fraction(0.90)
+    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:512'
+    print("PyTorch optimized for 24GB GPU:")
+    print(f"  - TF32 enabled: {torch.backends.cuda.matmul.allow_tf32}")
+    print(f"  - cuDNN benchmark: {torch.backends.cudnn.benchmark}")
+    print(f"  - Memory fraction: 90%")
 
 def get_gpu_memory_info():
     """Get current GPU memory usage information"""
-    if torch.cuda.is_available():
-        allocated = torch.cuda.memory_allocated(0) / 1024**3
-        reserved = torch.cuda.memory_reserved(0) / 1024**3
-        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
-        return {
-            'allocated_gb': allocated,
-            'reserved_gb': reserved,
-            'total_gb': total,
-            'free_gb': total - reserved,
-            'usage_percent': (reserved / total) * 100
-        }
-    return None
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available! Cannot get GPU memory info.")
+    
+    allocated = torch.cuda.memory_allocated(0) / 1024**3
+    reserved = torch.cuda.memory_reserved(0) / 1024**3
+    total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+    return {
+        'allocated_gb': allocated,
+        'reserved_gb': reserved,
+        'total_gb': total,
+        'free_gb': total - reserved,
+        'usage_percent': (reserved / total) * 100
+    }
 
 def save_data_url_to_file(data_url, output_path="./my_audio"):
     """
@@ -184,6 +187,18 @@ def audio_tensor_to_base64(audio_tensor, sample_rate):
 
 def handler(event):
     global model, device
+    
+    # CRITICAL: Ensure CUDA is available before processing
+    if not torch.cuda.is_available():
+        error_msg = "ERROR: CUDA/GPU is not available! This handler requires NVIDIA GPU. Cannot process request."
+        print(error_msg)
+        return {"status": "error", "error": error_msg}
+    
+    # Ensure device is set to CUDA
+    if device is None or device.type != 'cuda':
+        device = torch.device("cuda")
+        print(f"Device set to: {device}")
+    
     input_data = event['input']
     
     # Get parameters from the request, fallback to defaults if missing
@@ -196,13 +211,23 @@ def handler(event):
     print(f"New request. Prompt: {prompt[:50]}...")
     
     # Log GPU memory before processing
-    mem_before = get_gpu_memory_info()
-    if mem_before:
-        print(f"GPU Memory before: {mem_before['allocated_gb']:.2f}GB allocated, {mem_before['reserved_gb']:.2f}GB reserved ({mem_before['usage_percent']:.1f}% used)")
+    try:
+        mem_before = get_gpu_memory_info()
+        if mem_before:
+            print(f"GPU Memory before: {mem_before['allocated_gb']:.2f}GB allocated, {mem_before['reserved_gb']:.2f}GB reserved ({mem_before['usage_percent']:.1f}% used)")
+    except Exception as e:
+        print(f"Error getting GPU memory info: {e}")
+        return {"status": "error", "error": f"GPU not available: {str(e)}"}
     
     try:
         if model is None:
             initialize_model()
+        
+        # Verify model is on GPU before proceeding
+        if not verify_model_on_gpu():
+            error_msg = "ERROR: Model is not on GPU! Cannot proceed with CPU."
+            print(error_msg)
+            return {"status": "error", "error": error_msg}
 
         # Input handling (YouTube or Base64 Upload)
         wav_file = None
@@ -214,43 +239,53 @@ def handler(event):
             _, wav_file = download_youtube_audio(yt_url, output_path="./my_audio", audio_format="wav")
 
         if not wav_file:
-            return {"error": "Failed to prepare reference audio."}
+            return {"status": "error", "error": "Failed to prepare reference audio."}
 
         # Clear cache before generation
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
         gc.collect()
 
-        # Generation with Mixed Precision and full parameters
-        print(f"Generating audio on device: {device}")
+        # Generation with Mixed Precision and full parameters - MUST be on GPU
+        print(f"Generating audio on device: {device} (CUDA ONLY)")
         start_time = time.time()
         
-        with torch.cuda.amp.autocast(enabled=True):
-            audio_tensor = model.generate(
-                prompt,
-                audio_prompt_path=wav_file,
-                exaggeration=exaggeration,
-                cfg_weight=cfg_weight,
-                temperature=temperature
-            )
+        # Ensure we're using GPU context
+        with torch.cuda.device(0):  # Explicitly use GPU 0
+            with torch.cuda.amp.autocast(enabled=True):
+                audio_tensor = model.generate(
+                    prompt,
+                    audio_prompt_path=wav_file,
+                    exaggeration=exaggeration,
+                    cfg_weight=cfg_weight,
+                    temperature=temperature
+                )
+                
+                # Verify output tensor is on GPU
+                if isinstance(audio_tensor, torch.Tensor):
+                    if audio_tensor.device.type != 'cuda':
+                        print(f"WARNING: Generated tensor is on {audio_tensor.device}, moving to GPU...")
+                        audio_tensor = audio_tensor.to('cuda')
+                    print(f"Generated audio tensor device: {audio_tensor.device}")
 
         generation_time = time.time() - start_time
-        print(f"Generation completed in {generation_time:.2f} seconds")
+        print(f"Generation completed in {generation_time:.2f} seconds on GPU")
         
         # Log GPU memory after generation
-        mem_after = get_gpu_memory_info()
-        if mem_after:
-            print(f"GPU Memory after: {mem_after['allocated_gb']:.2f}GB allocated, {mem_after['reserved_gb']:.2f}GB reserved ({mem_after['usage_percent']:.1f}% used)")
+        try:
+            mem_after = get_gpu_memory_info()
+            if mem_after:
+                print(f"GPU Memory after: {mem_after['allocated_gb']:.2f}GB allocated, {mem_after['reserved_gb']:.2f}GB reserved ({mem_after['usage_percent']:.1f}% used)")
+        except Exception as e:
+            print(f"Warning: Could not get GPU memory info: {e}")
 
-        # Move to CPU for final encoding
+        # Move to CPU ONLY for final encoding/saving (I/O operations)
         if isinstance(audio_tensor, torch.Tensor):
             if audio_tensor.device.type != 'cpu':
+                print("Moving audio tensor to CPU for file I/O operations")
                 audio_tensor = audio_tensor.cpu()
-                print("Moved audio tensor to CPU for processing")
         
         # Clear GPU cache after moving to CPU
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
 
         torchaudio.save(output_filename, audio_tensor, model.sr)
         
@@ -258,6 +293,12 @@ def handler(event):
         if wav_file and os.path.exists(wav_file):
             os.remove(wav_file)
 
+    except RuntimeError as e:
+        if 'CUDA' in str(e) or 'GPU' in str(e) or 'cuda' in str(e).lower():
+            error_msg = f"GPU Error: {str(e)}"
+            print(f"ERROR: {error_msg}")
+            return {"status": "error", "error": error_msg}
+        raise
     except Exception as e:
         print(f"Error: {e}")
         import traceback
@@ -268,14 +309,16 @@ def handler(event):
     audio_base64 = audio_tensor_to_base64(audio_tensor, model.sr)
     
     # Final cleanup
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    torch.cuda.empty_cache()
     gc.collect()
     
     # Log final GPU memory
-    mem_final = get_gpu_memory_info()
-    if mem_final:
-        print(f"GPU Memory final: {mem_final['allocated_gb']:.2f}GB allocated, {mem_final['reserved_gb']:.2f}GB reserved ({mem_final['usage_percent']:.1f}% used)")
+    try:
+        mem_final = get_gpu_memory_info()
+        if mem_final:
+            print(f"GPU Memory final: {mem_final['allocated_gb']:.2f}GB allocated, {mem_final['reserved_gb']:.2f}GB reserved ({mem_final['usage_percent']:.1f}% used)")
+    except Exception as e:
+        print(f"Warning: Could not get final GPU memory info: {e}")
     
     return {
         "status": "success",
@@ -286,39 +329,74 @@ def handler(event):
         }
     }
 
+def verify_model_on_gpu():
+    """Verify that the model is actually on GPU"""
+    if not torch.cuda.is_available():
+        return False
+    
+    if model is None:
+        return False
+    
+    try:
+        # Check model parameters
+        if hasattr(model, 'parameters'):
+            first_param = next(model.parameters(), None)
+            if first_param is not None:
+                return first_param.device.type == 'cuda'
+        elif hasattr(model, 'model') and hasattr(model.model, 'parameters'):
+            first_param = next(model.model.parameters(), None)
+            if first_param is not None:
+                return first_param.device.type == 'cuda'
+    except Exception as e:
+        print(f"Error verifying model device: {e}")
+        return False
+    
+    return True
+
 def initialize_model():
     global model, device
     
     if model is not None:
-        return model
+        # Verify it's still on GPU
+        if not verify_model_on_gpu():
+            print("WARNING: Model exists but not on GPU! Reinitializing...")
+            model = None
+        else:
+            return model
+    
+    # CRITICAL: Fail immediately if CUDA is not available
+    if not torch.cuda.is_available():
+        error_msg = "FATAL ERROR: CUDA/GPU is not available! This handler REQUIRES NVIDIA GPU. Cannot initialize model."
+        print(error_msg)
+        raise RuntimeError(error_msg)
+    
+    # Set device to CUDA - NO CPU FALLBACK
+    device = torch.device("cuda")
     
     optimize_torch_settings()
     
-    # Detect and set device
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-        gpu_name = torch.cuda.get_device_name(0)
-        gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
-        
-        print(f"CUDA available! Using GPU: {gpu_name}")
-        print(f"CUDA version: {torch.version.cuda}")
-        print(f"GPU Memory: {gpu_memory:.2f} GB")
-        print(f"GPU Compute Capability: {torch.cuda.get_device_capability(0)}")
-        
-        if gpu_memory < 20:
-            print(f"WARNING: GPU has {gpu_memory:.2f}GB, recommended 24GB+ for optimal performance")
-    else:
-        device = torch.device("cpu")
-        print("WARNING: CUDA not available! Falling back to CPU (this will be slow)")
+    gpu_name = torch.cuda.get_device_name(0)
+    gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
+    
+    print("=" * 60)
+    print("CUDA GPU DETECTED - Initializing on GPU ONLY")
+    print("=" * 60)
+    print(f"GPU: {gpu_name}")
+    print(f"CUDA version: {torch.version.cuda}")
+    print(f"GPU Memory: {gpu_memory:.2f} GB")
+    print(f"GPU Compute Capability: {torch.cuda.get_device_capability(0)}")
+    print(f"Device: {device} (CUDA ONLY - NO CPU FALLBACK)")
+    
+    if gpu_memory < 20:
+        print(f"WARNING: GPU has {gpu_memory:.2f}GB, recommended 24GB+ for optimal performance")
     
     model_id = os.getenv("MODEL_ID", "ResembleAI/chatterbox-turbo")
     
     print(f"Initializing ChatterboxTTS model: {model_id}...")
     
     # Clear cache before loading model
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        gc.collect()
+    torch.cuda.empty_cache()
+    gc.collect()
     
     mem_before_load = get_gpu_memory_info()
     if mem_before_load:
@@ -330,48 +408,70 @@ def initialize_model():
         model = ChatterboxTTS.from_pretrained(model_id)
         print("Model loaded successfully")
     except Exception as e:
-        print(f"Error loading model: {e}")
-        raise
+        error_msg = f"Failed to load model: {e}"
+        print(f"ERROR: {error_msg}")
+        raise RuntimeError(error_msg)
     
-    # Explicitly move model to GPU device
-    if torch.cuda.is_available():
-        print("Moving model to GPU...")
-        if hasattr(model, 'to'):
-            model = model.to(device)
-            print("Model moved to GPU using .to() method")
-        elif hasattr(model, 'cuda'):
-            model = model.cuda()
-            print("Model moved to GPU using .cuda() method")
-        elif hasattr(model, 'model'):
-            if hasattr(model.model, 'to'):
-                model.model = model.model.to(device)
-                print("Model moved to GPU via model.model.to()")
-            elif hasattr(model.model, 'cuda'):
-                model.model = model.model.cuda()
-                print("Model moved to GPU via model.model.cuda()")
-        
-        # Verify model is on GPU
-        try:
-            if hasattr(model, 'parameters'):
-                first_param = next(model.parameters(), None)
-                if first_param is not None:
-                    param_device = first_param.device
-                    print(f"Model parameter device: {param_device}")
-                    if param_device.type != 'cuda':
-                        print("WARNING: Model parameters are not on GPU!")
-                    else:
-                        print("✓ Model successfully loaded on GPU!")
-            elif hasattr(model, 'model') and hasattr(model.model, 'parameters'):
-                first_param = next(model.model.parameters(), None)
-                if first_param is not None:
-                    param_device = first_param.device
-                    print(f"Model parameter device: {param_device}")
-                    if param_device.type != 'cuda':
-                        print("WARNING: Model parameters are not on GPU!")
-                    else:
-                        print("✓ Model successfully loaded on GPU!")
-        except Exception as e:
-            print(f"Could not verify model device: {e}")
+    # CRITICAL: Explicitly move model to GPU device - NO CPU FALLBACK
+    print("Moving model to GPU (CUDA ONLY)...")
+    moved_to_gpu = False
+    
+    if hasattr(model, 'to'):
+        model = model.to(device)
+        moved_to_gpu = True
+        print("Model moved to GPU using .to(device) method")
+    elif hasattr(model, 'cuda'):
+        model = model.cuda()
+        moved_to_gpu = True
+        print("Model moved to GPU using .cuda() method")
+    elif hasattr(model, 'model'):
+        if hasattr(model.model, 'to'):
+            model.model = model.model.to(device)
+            moved_to_gpu = True
+            print("Model moved to GPU via model.model.to(device)")
+        elif hasattr(model.model, 'cuda'):
+            model.model = model.model.cuda()
+            moved_to_gpu = True
+            print("Model moved to GPU via model.model.cuda()")
+    
+    if not moved_to_gpu:
+        error_msg = "ERROR: Could not move model to GPU! Model does not support .to() or .cuda() methods."
+        print(error_msg)
+        raise RuntimeError(error_msg)
+    
+    # CRITICAL: Verify model is actually on GPU
+    print("Verifying model is on GPU...")
+    if not verify_model_on_gpu():
+        error_msg = "FATAL ERROR: Model is NOT on GPU after moving! Cannot proceed."
+        print(error_msg)
+        raise RuntimeError(error_msg)
+    
+    # Get first parameter to verify device
+    try:
+        if hasattr(model, 'parameters'):
+            first_param = next(model.parameters(), None)
+            if first_param is not None:
+                param_device = first_param.device
+                print(f"✓ Model parameter device: {param_device}")
+                if param_device.type != 'cuda':
+                    error_msg = f"FATAL ERROR: Model parameters are on {param_device.type}, not CUDA!"
+                    print(error_msg)
+                    raise RuntimeError(error_msg)
+                print("✓✓✓ Model successfully verified on GPU! ✓✓✓")
+        elif hasattr(model, 'model') and hasattr(model.model, 'parameters'):
+            first_param = next(model.model.parameters(), None)
+            if first_param is not None:
+                param_device = first_param.device
+                print(f"✓ Model parameter device: {param_device}")
+                if param_device.type != 'cuda':
+                    error_msg = f"FATAL ERROR: Model parameters are on {param_device.type}, not CUDA!"
+                    print(error_msg)
+                    raise RuntimeError(error_msg)
+                print("✓✓✓ Model successfully verified on GPU! ✓✓✓")
+    except Exception as e:
+        error_msg = f"FATAL ERROR: Could not verify model device: {e}"
+        print(error_msg)
+        raise RuntimeError(error_msg)
     
     # Enable evaluation mode for inference
     if hasattr(model, 'eval'):
@@ -379,7 +479,7 @@ def initialize_model():
         print("Model set to evaluation mode")
     
     # Move model to half precision if GPU has enough memory (faster inference, less memory)
-    if torch.cuda.is_available() and torch.cuda.get_device_properties(0).total_memory >= 20 * 1024**3:
+    if torch.cuda.get_device_properties(0).total_memory >= 20 * 1024**3:
         try:
             if hasattr(model, 'half'):
                 model = model.half()
@@ -396,18 +496,28 @@ def initialize_model():
         print(f"GPU Memory after model load: {mem_after_load['allocated_gb']:.2f}GB allocated ({memory_used:.2f}GB used by model)")
         print(f"GPU Memory available: {mem_after_load['free_gb']:.2f}GB free")
     
-    print(f"Model initialized and ready on {device}")
+    print(f"✓✓✓ Model initialized and ready on {device} (CUDA ONLY) ✓✓✓")
+    print("=" * 60)
     
     # Final cache clear after initialization
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    torch.cuda.empty_cache()
 
 if __name__ == '__main__':
     print("=" * 60)
-    print("Chatterbox TTS RunPod Handler - Optimized for 24GB GPU")
+    print("Chatterbox TTS RunPod Handler - GPU ONLY (NO CPU FALLBACK)")
     print("=" * 60)
+    
+    # Verify CUDA before starting
+    if not torch.cuda.is_available():
+        error_msg = "FATAL ERROR: CUDA/GPU is not available! This handler REQUIRES NVIDIA GPU."
+        print("=" * 60)
+        print(error_msg)
+        print("=" * 60)
+        raise RuntimeError(error_msg)
+    
     initialize_model()
     print("=" * 60)
     print("Handler ready and waiting for requests...")
+    print("GPU ONLY mode - All processing will use NVIDIA GPU")
     print("=" * 60)
     runpod.serverless.start({'handler': handler})
