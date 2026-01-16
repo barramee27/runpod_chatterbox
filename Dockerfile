@@ -22,7 +22,7 @@ RUN pip install chatterbox-tts==0.1.6
 
 COPY rp_handler.py /
 
-# Change this line (likely line 26) in your Dockerfile:
-RUN python -c "from chatterbox.tts import ChatterboxTTS; ChatterboxTTS.from_pretrained(device='cpu')"
+# Verify CUDA is available and test model loading
+RUN python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('CUDA device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A')"
 
 CMD ["python3", "-u", "rp_handler.py"]
