@@ -402,11 +402,11 @@ def initialize_model():
     if mem_before_load:
         print(f"GPU Memory before model load: {mem_before_load['free_gb']:.2f}GB free")
     
-    # Initialize model - CRITICAL FIX: Do NOT pass device to from_pretrained
-    # The library's from_pretrained method does NOT accept device parameter
-    # We load first, then move to device manually
+    # Initialize model - Load without device parameter to avoid library conflicts
+    # The library's from_pretrained method loads the model, we'll move it to GPU manually
     try:
-        # Load model WITHOUT device parameter - this is the key fix
+        print(f"Loading model: {model_id}...")
+        # Load model - do NOT pass device parameter as library may have bugs
         model = ChatterboxTTS.from_pretrained(model_id)
         print("Model loaded successfully")
     except Exception as e:
@@ -414,6 +414,20 @@ def initialize_model():
         print(f"ERROR: {error_msg}")
         import traceback
         traceback.print_exc()
+        
+        # Check if this is the known "Invalid device string" bug
+        if "Invalid device string" in str(e) and model_id in str(e):
+            print("=" * 60)
+            print("KNOWN BUG DETECTED: chatterbox-tts library device handling issue")
+            print(f"The library is incorrectly using model_id '{model_id}' as a device string")
+            print("This is a bug in the chatterbox-tts library version 0.1.6")
+            print("=" * 60)
+            print("Possible solutions:")
+            print("1. Update chatterbox-tts to a newer version (if available)")
+            print("2. Use a different model ID format")
+            print("3. Check if MODEL_ID environment variable is set incorrectly")
+            print("=" * 60)
+        
         raise RuntimeError(error_msg)
     
     # CRITICAL: Explicitly move model to GPU device - NO CPU FALLBACK
@@ -545,7 +559,7 @@ if __name__ == '__main__':
         runpod.serverless.start({'handler': handler})
         
     except Exception as e:
-        error_msg = f"FATAL ERROR during handler startup: {str(e)}"
+        error_msg = f"FATAL ERROR during handler startup: {str(e)}")
         print("=" * 60)
         print(error_msg)
         print("=" * 60)
