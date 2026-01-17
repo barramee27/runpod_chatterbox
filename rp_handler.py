@@ -9,6 +9,7 @@ import base64
 import gc
 from chatterbox.tts import ChatterboxTTS
 from pathlib import Path
+from huggingface_hub import snapshot_download
 
 # Shared variables
 model = None
@@ -402,12 +403,23 @@ def initialize_model():
     if mem_before_load:
         print(f"GPU Memory before model load: {mem_before_load['free_gb']:.2f}GB free")
     
-    # Initialize model - Load without device parameter to avoid library conflicts
-    # The library's from_pretrained method loads the model, we'll move it to GPU manually
+    # WORKAROUND: The chatterbox-tts library's from_pretrained() has a bug where it passes
+    # model_id as the device parameter to from_local(). We'll download the model manually
+    # and use from_local() directly with the correct device parameter.
     try:
-        print(f"Loading model: {model_id}...")
-        # Load model - do NOT pass device parameter as library may have bugs
-        model = ChatterboxTTS.from_pretrained(model_id)
+        print(f"Downloading model: {model_id}...")
+        # Download model files to a local cache directory
+        cache_dir = os.path.join(os.getcwd(), ".model_cache")
+        model_path = snapshot_download(
+            repo_id=model_id,
+            cache_dir=cache_dir,
+            local_files_only=False
+        )
+        print(f"Model downloaded to: {model_path}")
+        
+        # Use from_local() with explicit device parameter to avoid the bug
+        print("Loading model using from_local() with explicit CUDA device...")
+        model = ChatterboxTTS.from_local(model_path, device=device)
         print("Model loaded successfully")
     except Exception as e:
         error_msg = f"Failed to load model: {e}"
@@ -422,54 +434,60 @@ def initialize_model():
             print(f"The library is incorrectly using model_id '{model_id}' as a device string")
             print("This is a bug in the chatterbox-tts library version 0.1.6")
             print("=" * 60)
-            print("Possible solutions:")
-            print("1. Update chatterbox-tts to a newer version (if available)")
-            print("2. Use a different model ID format")
-            print("3. Check if MODEL_ID environment variable is set incorrectly")
+            print("Attempting fallback: trying from_pretrained() without device...")
             print("=" * 60)
+            try:
+                # Fallback: try from_pretrained without any device handling
+                model = ChatterboxTTS.from_pretrained(model_id)
+                print("Fallback successful - model loaded via from_pretrained()")
+            except Exception as e2:
+                print(f"Fallback also failed: {e2}")
+                raise RuntimeError(error_msg)
+        else:
+            raise RuntimeError(error_msg)
+    
+    # Verify model is on GPU (from_local should have already placed it there)
+    print("Verifying model is on GPU...")
+    if not verify_model_on_gpu():
+        print("WARNING: Model not on GPU after from_local(). Attempting manual move...")
+        moved_to_gpu = False
         
-        raise RuntimeError(error_msg)
-    
-    # CRITICAL: Explicitly move model to GPU device - NO CPU FALLBACK
-    print("Moving model to GPU (CUDA ONLY)...")
-    moved_to_gpu = False
-    
-    if hasattr(model, 'to'):
-        try:
-            model = model.to(device)
-            moved_to_gpu = True
-            print("Model moved to GPU using .to(device) method")
-        except Exception as e:
-            print(f"Warning: .to(device) failed: {e}")
-    elif hasattr(model, 'cuda'):
-        try:
-            model = model.cuda()
-            moved_to_gpu = True
-            print("Model moved to GPU using .cuda() method")
-        except Exception as e:
-            print(f"Warning: .cuda() failed: {e}")
-    
-    # Try moving internal model components if direct move didn't work
-    if not moved_to_gpu and hasattr(model, 'model'):
-        if hasattr(model.model, 'to'):
+        if hasattr(model, 'to'):
             try:
-                model.model = model.model.to(device)
+                model = model.to(device)
                 moved_to_gpu = True
-                print("Model moved to GPU via model.model.to(device)")
+                print("Model moved to GPU using .to(device) method")
             except Exception as e:
-                print(f"Warning: model.model.to(device) failed: {e}")
-        elif hasattr(model.model, 'cuda'):
+                print(f"Warning: .to(device) failed: {e}")
+        elif hasattr(model, 'cuda'):
             try:
-                model.model = model.model.cuda()
+                model = model.cuda()
                 moved_to_gpu = True
-                print("Model moved to GPU via model.model.cuda()")
+                print("Model moved to GPU using .cuda() method")
             except Exception as e:
-                print(f"Warning: model.model.cuda() failed: {e}")
-    
-    if not moved_to_gpu:
-        error_msg = "ERROR: Could not move model to GPU! Model does not support .to() or .cuda() methods."
-        print(error_msg)
-        raise RuntimeError(error_msg)
+                print(f"Warning: .cuda() failed: {e}")
+        
+        # Try moving internal model components if direct move didn't work
+        if not moved_to_gpu and hasattr(model, 'model'):
+            if hasattr(model.model, 'to'):
+                try:
+                    model.model = model.model.to(device)
+                    moved_to_gpu = True
+                    print("Model moved to GPU via model.model.to(device)")
+                except Exception as e:
+                    print(f"Warning: model.model.to(device) failed: {e}")
+            elif hasattr(model.model, 'cuda'):
+                try:
+                    model.model = model.model.cuda()
+                    moved_to_gpu = True
+                    print("Model moved to GPU via model.model.cuda()")
+                except Exception as e:
+                    print(f"Warning: model.model.cuda() failed: {e}")
+        
+        if not moved_to_gpu:
+            error_msg = "ERROR: Could not move model to GPU! Model does not support .to() or .cuda() methods."
+            print(error_msg)
+            raise RuntimeError(error_msg)
     
     # CRITICAL: Verify model is actually on GPU
     print("Verifying model is on GPU...")
@@ -559,7 +577,7 @@ if __name__ == '__main__':
         runpod.serverless.start({'handler': handler})
         
     except Exception as e:
-        error_msg = f"FATAL ERROR during handler startup: {str(e)}")
+        error_msg = f"FATAL ERROR during handler startup: {str(e)}"
         print("=" * 60)
         print(error_msg)
         print("=" * 60)
